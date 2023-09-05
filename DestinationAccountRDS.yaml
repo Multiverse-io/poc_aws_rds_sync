@@ -22,12 +22,12 @@ Parameters:
   DatabaseName:
     Type: String 
     Description: Name of the database in this account.  
-    Default: "rds-dev-restored-db"
+    Default: "test-data-warehouse-development-db"
 
   SecretName:
     Type: String 
     Description: Secret where DB details will be stored.  
-    Default: "test/rdscopy/prddbinstancename"
+    Default: "test/rdscopy/testdbinstancename"
 
   SGID:
     Type: String 
@@ -230,7 +230,7 @@ Resources:
       Timeout: 60
       Role: !GetAtt LambdaTargetAccountRole.Arn 
 
-# Step 4:  CopySharedSnapshot        
+# Step 3:  CopySharedSnapshot
 #To make a copy of the shared cross account snapshot 
   CopySharedSnapshot:
     Type: AWS::Lambda::Function
@@ -306,7 +306,7 @@ Resources:
           kms_key: !Ref KMSKey
 
 
-# Step 5:  CheckCopiedSnapshotStatus  
+# Step 4:  CheckCopiedSnapshotStatus
 # This option fetches the copy snapshot status and passes the response to IsCopySharedRDSSnapshotAvailable method
   CheckCopiedSnapshotStatus:
     Type: AWS::Lambda::Function
@@ -452,9 +452,80 @@ Resources:
           engine : !Ref Engine
           secretname : !Ref SecretName  
 
+# Step 7 V2 Delete DEV RDS instance
+#This function will delete tagged rds instances.
+  CleanOlderDBInstances:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-CleanOlderDBInstances
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import logging
+          import json
+          import boto3
+          from botocore.exceptions import ClientError
 
-# Step 7:  RestoreDBInstance        
+          # Set up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def delete_db_instance(dbname):
+
+              # Create RDS client
+              rds = boto3.client('rds')
+
+              try:
+                  response = rds.delete_db_instance(
+                  DBInstanceIdentifier=dbname,
+                  SkipFinalSnapshot=False,
+                  DeleteAutomatedBackups=False
+                  )
+                  return(response)
+              except Exception as e:
+                  raise e
+
+          def lambda_handler(event, context):
+              # TODO implement
+
+              client = boto3.client('resourcegroupstaggingapi')
+              
+              try: 
+                  response = client.get_resources(
+                  PaginationToken='',
+                  TagFilters=[
+                      {
+                          'Key': 'Name',
+                          'Values': [
+                              'test-data-warehouse-development-db-snapshot',
+                          ]
+                      },
+                  ],
+                  ResourcesPerPage=20,
+                  ResourceTypeFilters=[
+                      'rds:db',
+                  ],
+                  IncludeComplianceDetails=False,
+                  ExcludeCompliantResources=False
+                  )
+                  print(json.dumps(response,indent=4))
+              except Exception as e:
+                  raise e
+
+              for instance in response["ResourceTagMappingList"]:
+                  dbname=instance["ResourceARN"][38:]
+                  logger.info(dbname)
+                  s=delete_db_instance(dbname)
+                  logger.info(s)
+      Description: 'This function will delete tagged rds instances'
+      MemorySize: 128
+      Timeout: 900
+      Role: !GetAtt LambdaTargetAccountRole.Arn
+
+# Step 8:  RestoreDBInstance
 #This function will restore RDS instance from shared snapshot.
+# Removing db_version from name but keeping it in records atm
   RestoreDBInstance:
     Type: AWS::Lambda::Function
     Properties:
@@ -486,7 +557,7 @@ Resources:
                   db_host_prefix_value=databasename+"-"
                   db_version=0
 
-              DBInstanceIdentifier=db_host_prefix_value + str(db_version+1)
+              DBInstanceIdentifier=db_host_prefix_value
               db_snapshot_identifier = event['DBSnapshot']['TargetDBSnapshotIdentifier']
               print("Bring new instance", DBInstanceIdentifier ,"from snapshot ->", db_snapshot_identifier)
               try:
@@ -560,221 +631,99 @@ Resources:
       Timeout: 900
       Role: !GetAtt LambdaTargetAccountRole.Arn
 
-# Step 8:  UpdateAWSSecret       
-#This function will swap the rds name with existing rds.
-  UpdateAWSSecret:
+  AlertSlackChannel:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub ${AWS::StackName}-UpdateAWSSecret
+      FunctionName: !Sub ${AWS::StackName}-AlertDBInstanceStatus
       Handler: index.lambda_handler
       Runtime: python3.9
       Code:
         ZipFile: |
-          import logging
-          import boto3, os
-          import json
-          import base64
-          from botocore.exceptions import ClientError
+          from __future__ import print_function
 
-          # Set up logging
+          import boto3
+          import json
+          import logging
+          import os
+          import datetime
+          
+          from dateutil.tz import tzlocal
+          from operator import itemgetter
+          
+          from urllib.request import Request, urlopen, URLError, HTTPError
+          from urllib import parse
+          import ast
+          
+          # HOOK_URL = os.environ['UNENCRYPTED_HOOK_URL']
+          # Your secret's name and region
+          secret_name = os.environ['UNENCRYPTED_HOOK_URL']
+          region_name = "eu-west-2"
+          
+          #Set up our Session and Client
+          session = boto3.session.Session()
+          client = session.client(
+              service_name='secretsmanager',
+              region_name=region_name
+          )
+          
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-
-          # Create RDS client
-          rds = boto3.client('rds')
-              
-          def tag_instance(db_version,db_instance_identifier):
-              NoOfOlderInstances=os.environ.get("NoOfOlderInstances")
-              # Access the older DB instance and get the arn
-              
-              db_prefix=("".join(db_instance_identifier.rsplit(db_version)))
-              print(db_version,db_instance_identifier, db_prefix )
-              print("*******************************")
-              oldest_db_version=int(db_version)-int(NoOfOlderInstances)
-              print (oldest_db_version)
-              
-              if oldest_db_version < 0 :
-                  return (None)
-              else:
-                  oldest_db_instance_identifier=db_prefix+str(oldest_db_version)
-                  print(oldest_db_instance_identifier)
-                  
-                  try:
-                      response = rds.describe_db_instances(
-                          DBInstanceIdentifier=oldest_db_instance_identifier
-                      )
-                      oldest_db_instance_arn=response["DBInstances"][0]["DBInstanceArn"]
-                      logger.info('### oldest_db_instance_arn ###')
-                      logger.info(oldest_db_instance_arn)
-                  
-                  # Tag the older RDS cluster
-                      response = rds.add_tags_to_resource(
-                      ResourceName=oldest_db_instance_arn,
-                      Tags=[
-                          {
-                              'Key': 'to-be-deleted',
-                              'Value': 'True'
-                          },
-                          ]
-                      )
-                      print("Got tagged -->",oldest_db_instance_arn)
-                      return(response)
-                  except ClientError as e:
-                      print("Older instance not found",e)
-                  
-          def update_secret(db_instance_identifier):
-              secret_name = os.environ.get("secretname")
-              db_prefix = os.environ.get("databasename")
-              region_name = "eu-west-2"
-
-              # Find the endpoint name of new cluster
+          
+          now = datetime.datetime.now()
+          
+          fmt1 = now.strftime('%A, %B %d, %Y - %H:%M')
+          logger.info('fmt1 = %s' % (fmt1))
+          
+          
+          def lambda_handler(event, context):
+              # Calling SecretsManager
+              slack_secret_response = client.get_secret_value(
+                  SecretId=secret_name
+              )
+          
+              slack_url_secret = slack_secret_response['SecretString']
+              HOOK_URL_JSON= json.loads(slack_url_secret)
+              HOOK_URL= HOOK_URL_JSON["UNENCRYPTED_HOOK_URL"]
+          
+              rds = boto3.client('rds')
+              db_instance_identifier = event["db_instance_identifier"]
+              print(event["db_instance_identifier"])
               try:
                   response = rds.describe_db_instances(
                       DBInstanceIdentifier=db_instance_identifier
                   )
-                  endpoint=response["DBInstances"][0]["Endpoint"]["Address"]
-                  print("Endpoint name --->",endpoint)
-              except ClientError as e:
-                  raise e
                   
-              # Create a Secrets Manager client
-              session = boto3.session.Session()
-              client = session.client(
-                  service_name='secretsmanager',
-                  region_name=region_name
-              )
-              try:
-                  get_secret_value_response = client.get_secret_value(
-                      SecretId=secret_name
-                  )
-                  if 'SecretString' in get_secret_value_response:
-                      secret = get_secret_value_response['SecretString']
-                      db_value=json.loads(secret)
+                  print("Response >> ",response)
+                  
+                  if not response['DBInstances']:
+                      return {'status':'NotAvailable','db_instance_identifier': event["db_instance_identifier"], "db_version": event["db_version"] }
+                      
+                  sorted_keys = sorted(response['DBInstances'], key=itemgetter('InstanceCreateTime'), reverse=True)
+                  status = sorted_keys[0]['DBInstanceStatus']
+          
+                  if status == 'available':
+                      slack_message = {
+                        'channel': "data_insight_resource_alert",
+                        'text': " :rotating_light:  *" + fmt1 +
+                                " + "` \n" + "RDS Sync status successful - TEST " + "."
+                    }
                   else:
-                      secret = base64.b64decode(get_secret_value_response['SecretBinary'])
-                      db_value=json.loads(decoded_binary_secret)
-                  
-                  updated_secret = json.loads(secret)
-                  updated_secret['db_host'] = endpoint
-                  updated_secret['db_prefix'] = db_prefix
-                  response = client.update_secret(
-                    SecretId=secret_name,
-                    Description='RDS Instance name',
-                    SecretString=json.dumps(updated_secret, indent=4, sort_keys=True, default=str)
-                    )
-                  logger.info("Updated the Secret successfully")
-                  return (response)
-                  
-              except ClientError as e:
-                  if e.response['Error']['Code'] == 'DecryptionFailureException':
-                      # Secrets Manager can't decrypt the protected secret text using the provided KMS key.
-                      # Deal with the exception here, and/or rethrow at your discretion.
-                      raise e
-                  elif e.response['Error']['Code'] == 'InternalServiceErrorException':
-                      # An error occurred on the server side.
-                      # Deal with the exception here, and/or rethrow at your discretion.
-                      raise e
-                  elif e.response['Error']['Code'] == 'InvalidParameterException':
-                      # You provided an invalid value for a parameter.
-                      # Deal with the exception here, and/or rethrow at your discretion.
-                      raise e
-                  elif e.response['Error']['Code'] == 'InvalidRequestException':
-                      # You provided a parameter value that is not valid for the current state of the resource.
-                      # Deal with the exception here, and/or rethrow at your discretion.
-                      raise e
-                  elif (e.response['Error']['Code']) == 'ResourceNotFoundException':
-                      # We can't find the resource that you asked for.
-                      # Deal with the exception here, and/or rethrow at your discretion.
-                      raise e
+                      slack_message = {
+                        'channel': "data_insight_resource_alert",
+                        'text': " :rotating_light:  *" + fmt1 +
+                                " + "` \n" + "RDS Sync status failed - TEST " + "."
+                    }
+              except Exception as e:
+                  return {'status':'NotAvailable', "db_instance_identifier": event["db_instance_identifier"], "db_version": event["db_version"] }
+                  raise e
 
-          def lambda_handler(event, context):
-              # TODO implement
-              db_instance_identifier = event["db_instance_identifier"]
-              db_version = event["db_version"]
-              s=update_secret(db_instance_identifier)
-              tag_instance(db_version,db_instance_identifier)
-              return(s)
-
-      Description: 'This function will swap the rds name with existing rds'
+      Description: 'This function will alert DI channel regarding DB status.'
       MemorySize: 128
       Timeout: 900
       Role: !GetAtt LambdaTargetAccountRole.Arn
-      Environment: 
-        Variables: 
-          secretname : !Ref SecretName 
-          NoOfOlderInstances : !Ref NoOfOlderInstances 
-          databasename: !Ref DatabaseName
-
-# Step 9:  CleanOlderDBInstances       
-#This function will delete tagged rds instances.
-  CleanOlderDBInstances:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub ${AWS::StackName}-CleanOlderDBInstances
-      Handler: index.lambda_handler
-      Runtime: python3.9
-      Code:
-        ZipFile: |
-          import logging
-          import json
-          import boto3
-          from botocore.exceptions import ClientError
-
-          # Set up logging
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-
-          def delete_db_instance(dbname):
-
-              # Create RDS client
-              rds = boto3.client('rds')
-
-              try:
-                  response = rds.delete_db_instance(
-                  DBInstanceIdentifier=dbname,
-                  SkipFinalSnapshot=True,
-                  DeleteAutomatedBackups=True
-                  )
-                  return(response)
-              except Exception as e:
-                  raise e
-
-          def lambda_handler(event, context):
-              # TODO implement
-
-              client = boto3.client('resourcegroupstaggingapi')
-              
-              try: 
-                  response = client.get_resources(
-                  PaginationToken='',
-                  TagFilters=[
-                      {
-                          'Key': 'to-be-deleted',
-                          'Values': [
-                              'True',
-                          ]
-                      },
-                  ],
-                  ResourcesPerPage=20,
-                  ResourceTypeFilters=[
-                      'rds:db',
-                  ],
-                  IncludeComplianceDetails=False,
-                  ExcludeCompliantResources=False
-                  )
-                  print(json.dumps(response,indent=4))
-              except Exception as e:
-                  raise e
-
-              for instance in response["ResourceTagMappingList"]:
-                  dbname=instance["ResourceARN"][38:]
-                  logger.info(dbname)
-                  s=delete_db_instance(dbname)
-                  logger.info(s)
-      Description: 'This function will delete tagged rds instances'
-      MemorySize: 128
-      Timeout: 900
-      Role: !GetAtt LambdaTargetAccountRole.Arn
+      Environment:
+        Variables:
+          UNENCRYPTED_HOOK_URL: SLACK_HOOK_URL
 
   StepFunctionLambdaExecutinRole:
     Type: "AWS::IAM::Role"
@@ -799,7 +748,7 @@ Resources:
   TargetAccountTargetRegionRDSRestoreWorkflow:
     Type: AWS::StepFunctions::StateMachine
     Properties:
-        StateMachineName: !Sub ${AWS::StackName}-CrossAccount-RDSSync-Target_Account
+        StateMachineName: !Sub ${AWS::StackName}-XAcc-RDSSync-TargetAcc
         DefinitionString:
           !Sub
             - |-
@@ -864,6 +813,11 @@ Resources:
                   "ReadExistingDBName": {
                     "Type": "Task",
                     "Resource": "${ReadSecretDBName.Arn}",
+                    "Next": "CleanOlderDBInstances"
+                  },
+                  "CleanOlderDBInstances": {
+                    "Type": "Task",
+                    "Resource": "${CleanOlderDBInstances.Arn}",
                     "Next": "RestoreDBInstance"
                   },
                   "RestoreDBInstance": {
@@ -887,7 +841,7 @@ Resources:
                       {
                         "Variable": "$.status",
                         "StringEquals": "Available",
-                        "Next": "UpdateSecretWithDBValue"
+                        "Next": "AlertSlackChannel"
                       }
                     ]
                   },
@@ -896,18 +850,12 @@ Resources:
                     "Seconds": 300,
                     "Next": "FetchNewDBInstanceStatus"
                   },
-                  "UpdateSecretWithDBValue": {
+                  "AlertSlackChannel": {
                     "Type": "Task",
-                    "Resource": "${UpdateAWSSecret.Arn}",
-                    "Next": "CleanOlderDBInstances"
-                  },
-                  "CleanOlderDBInstances": {
-                    "Type": "Task",
-                    "Resource": "${CleanOlderDBInstances.Arn}",
+                    "Resource": "${AlertSlackChannel.Arn}",
                     "End": true
-                  }
-                }
               }
-
+              }
+              }
             - {RestoreDBInstanceArn: !GetAtt [ RestoreDBInstance, Arn ]}
         RoleArn: !GetAtt StepFunctionLambdaExecutinRole.Arn
