@@ -22,7 +22,7 @@ Parameters:
   DatabaseName:
     Type: String 
     Description: Name of the database in this account.  
-    Default: "rds-dev-restored-db"
+    Default: "whitehat-data-warehouse-test-db"
 
   SecretName:
     Type: String 
@@ -156,7 +156,7 @@ Resources:
                   print("error: {0}".format(e))
 
       Description: 'This Lambda function will invoke Step Function workflow.'
-      MemorySize: 128
+      MemorySize: 256
       Timeout: 60
       Role: !GetAtt InvokeStepFunctionLambdaRole.Arn 
       Environment: 
@@ -704,8 +704,109 @@ Resources:
           secretname : !Ref SecretName 
           NoOfOlderInstances : !Ref NoOfOlderInstances 
           databasename: !Ref DatabaseName
+# Step 10:  RenameOldDBInstance
+#This function will rename the day old DB instance to make the endpoint available
+  RenameOldDBInstance:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-RenameOldDBInstance
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
 
-# Step 9:  CleanOlderDBInstances       
+          def lambda_handler(event, context):
+              # Initialize the RDS client
+              rds = boto3.client('rds')
+          
+              # Define the tag filter
+              tag_filter = [
+                  {
+                      'Name': 'to-be-deleted',
+                      'Values': ['True']
+                  }
+              ]
+          
+              try:
+                  # Get a list of RDS instances that match the tag filter
+                  instances = rds.describe_db_instances(Filters=tag_filter)
+          
+                  # Iterate through the instances and update their names
+                  for instance in instances['DBInstances']:
+                      instance_id = instance['DBInstanceIdentifier']
+                      new_instance_name = 'renamed_instance_to_delete'  # Replace with the desired new name
+                      rds.modify_db_instance(
+                          DBInstanceIdentifier=instance_id,
+                          NewDBInstanceIdentifier=new_instance_name
+                      )
+          
+                  return {
+                      'statusCode': 200,
+                      'body': 'RDS instance names updated successfully.'
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error: {str(e)}'
+                  }
+      Description: 'This function will rename the day old DB instance to make the endpoint available'
+      MemorySize: 128
+      Timeout: 900
+      Role: !GetAtt LambdaTargetAccountRole.Arn
+
+# Step 11:  RenameNewDBInstance
+#This function will rename the up to date DB instance so that there is no change to endpoints for other services
+  RenameNewDBInstance:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-RenameNewDBInstance
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          
+          def lambda_handler(event, context):
+              # Initialize the RDS client
+              rds = boto3.client('rds')
+          
+              # Define the current and new instance names
+              current_instance_name = 'whitehat-data-warehouse-test-db-1'  # Replace with the current name
+              new_instance_name = 'whitehat-data-warehouse-test-db'  # Replace with the desired new name
+          
+              try:
+                  # Describe the RDS instance to get its current name
+                  response = rds.describe_db_instances(DBInstanceIdentifier=current_instance_name)
+                  
+                  # Check if the instance exists
+                  if len(response['DBInstances']) == 0:
+                      return {
+                          'statusCode': 404,
+                          'body': f'RDS instance {current_instance_name} not found.'
+                      }
+                  
+                  # Modify the RDS instance name
+                  rds.modify_db_instance(
+                      DBInstanceIdentifier=current_instance_name,
+                      NewDBInstanceIdentifier=new_instance_name
+                  )
+          
+                  return {
+                      'statusCode': 200,
+                      'body': f'RDS instance name updated from {current_instance_name} to {new_instance_name}.'
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error: {str(e)}'
+                  }
+      Description: 'This function will rename the up to date DB instance & endpoint to original'
+      MemorySize: 128
+      Timeout: 900
+      Role: !GetAtt LambdaTargetAccountRole.Arn
+
+# Step 12:  CleanOlderDBInstances
 #This function will delete tagged rds instances.
   CleanOlderDBInstances:
     Type: AWS::Lambda::Function
@@ -899,6 +1000,16 @@ Resources:
                   "UpdateSecretWithDBValue": {
                     "Type": "Task",
                     "Resource": "${UpdateAWSSecret.Arn}",
+                    "Next": "RenameOldDBInstance"
+                  },
+                  "RenameOldDBInstance": {
+                    "Type": "Task",
+                    "Resource": "${RenameOldDBInstance.Arn}",
+                    "Next": "RenameNewDBInstance"
+                  },
+                  "RenameNewDBInstance": {
+                    "Type": "Task",
+                    "Resource": "${RenameNewDBInstance.Arn}",
                     "Next": "CleanOlderDBInstances"
                   },
                   "CleanOlderDBInstances": {
