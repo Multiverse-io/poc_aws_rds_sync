@@ -766,41 +766,42 @@ Resources:
       Code:
         ZipFile: |
           import boto3
-          
+
           def lambda_handler(event, context):
               # Initialize the RDS client
               rds = boto3.client('rds')
           
-              # Define the current and new instance names
-              current_instance_name = 'whitehat-data-warehouse-test-db-1'  # Replace with the current name
-              new_instance_name = 'whitehat-data-warehouse-test-db'  # Replace with the desired new name
+              # Define the substring to search for in instance names
+              substring_to_search = 'whitehat-data-warehouse-test-db-'  # Replace with your desired substring
           
               try:
-                  # Describe the RDS instance to get its current name
-                  response = rds.describe_db_instances(DBInstanceIdentifier=current_instance_name)
-                  
-                  # Check if the instance exists
-                  if len(response['DBInstances']) == 0:
-                      return {
-                          'statusCode': 404,
-                          'body': f'RDS instance {current_instance_name} not found.'
-                      }
-                  
-                  # Modify the RDS instance name
-                  rds.modify_db_instance(
-                      DBInstanceIdentifier=current_instance_name,
-                      NewDBInstanceIdentifier=new_instance_name
-                  )
+                  # List all RDS instances
+                  instances = rds.describe_db_instances()
+          
+                  # Iterate through the instances and update their names
+                  for instance in instances['DBInstances']:
+                      instance_id = instance['DBInstanceIdentifier']
+                      current_instance_name = instance['DBInstanceIdentifier']
+          
+                      # Check if the current name contains the specified substring
+                      if substring_to_search in current_instance_name:
+                          # Modify the RDS instance name
+                          new_instance_name = current_instance_name.replace(substring_to_search, 'whitehat-data-warehouse-test-db')
+                          rds.modify_db_instance(
+                              DBInstanceIdentifier=instance_id,
+                              NewDBInstanceIdentifier=new_instance_name
+                          )
           
                   return {
                       'statusCode': 200,
-                      'body': f'RDS instance name updated from {current_instance_name} to {new_instance_name}.'
+                      'body': f'RDS instance names updated successfully.'
                   }
               except Exception as e:
                   return {
                       'statusCode': 500,
                       'body': f'Error: {str(e)}'
                   }
+
       Description: 'This function will rename the up to date DB instance & endpoint to original'
       MemorySize: 128
       Timeout: 900
