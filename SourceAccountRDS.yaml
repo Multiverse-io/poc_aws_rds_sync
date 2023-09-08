@@ -272,7 +272,8 @@ Resources:
       Environment: 
         Variables:          
           kms_key: !Ref KMSKey
-          db_snapshot_identifier: !Ref SourceDBSnapshotName         
+          db_snapshot_identifier: !Ref SourceDBSnapshotName
+          target_region : 'eu-west-2'
 #      TODO: Add more tags
       Tags:
             - 

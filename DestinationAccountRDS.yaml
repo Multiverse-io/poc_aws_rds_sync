@@ -22,7 +22,7 @@ Parameters:
   DatabaseName:
     Type: String 
     Description: Name of the database in this account.  
-    Default: "test-data-warehouse-development-db"
+    Default: "whitehat-data-warehouse-test-db"
 
   SecretName:
     Type: String 
@@ -156,7 +156,7 @@ Resources:
                   print("error: {0}".format(e))
 
       Description: 'This Lambda function will invoke Step Function workflow.'
-      MemorySize: 128
+      MemorySize: 256
       Timeout: 60
       Role: !GetAtt InvokeStepFunctionLambdaRole.Arn 
       Environment: 
@@ -537,22 +537,23 @@ Resources:
           import boto3
           import logging
           import os
-
+          
           rds = boto3.client('rds')
-
+          
           engine = os.environ.get("engine")
           dbInstanceClass = os.environ.get("dbInstanceClass") 
           subnetgroups = os.environ.get("subnetgroups")
           securitygroupid = os.environ.get("securitygroupid")
           databasename = os.environ.get("databasename")
-
+          
           def lambda_handler(event, context):
               if event['DBSnapshot']['db_value']['db_prefix']:
                   db_host_prefix_value = event['DBSnapshot']['db_value']['db_prefix']+"-"
                   db_host=event['DBSnapshot']['db_value']['db_host']
                   db_host_str = db_host.split(".",1)[0].split(db_host_prefix_value, maxsplit=1)
                   print(db_host_str)
-                  db_version = int(db_host_str[1])
+                  db_version = int(0)
+                  print(db_version)
               else:
                   db_host_prefix_value=databasename+"-"
                   db_version=0
@@ -573,7 +574,6 @@ Resources:
               except Exception as e:
                   print(e)
                   raise e
-
       Description: 'This function will restore RDS instance from shared snapshot.'
       MemorySize: 128
       Timeout: 60
@@ -640,7 +640,7 @@ Resources:
       Code:
         ZipFile: |
           from __future__ import print_function
-
+          
           import boto3
           import json
           import logging
@@ -692,27 +692,232 @@ Resources:
                   response = rds.describe_db_instances(
                       DBInstanceIdentifier=db_instance_identifier
                   )
-                  
-                  print("Response >> ",response)
-                  
-                  if not response['DBInstances']:
-                      return {'status':'NotAvailable','db_instance_identifier': event["db_instance_identifier"], "db_version": event["db_version"] }
-                      
-                  sorted_keys = sorted(response['DBInstances'], key=itemgetter('InstanceCreateTime'), reverse=True)
-                  status = sorted_keys[0]['DBInstanceStatus']
           
-                  if status == 'available':
-                      slack_message = {
-                        'channel': "data_insight_resource_alert",
-                        'text': " :rotating_light:  *" + fmt1 +
-                                " + "` \n" + "RDS Sync status successful - TEST " + "."
-                    }
-                  else:
-                      slack_message = {
-                        'channel': "data_insight_resource_alert",
-                        'text': " :rotating_light:  *" + fmt1 +
-                                " + "` \n" + "RDS Sync status failed - TEST " + "."
-                    }
+                  print("Response >> ",response)
+          
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DecryptionFailureException':
+                      # Secrets Manager can't decrypt the protected secret text using the provided KMS key.
+                      # Deal with the exception here, and/or rethrow at your discretion.
+                      raise e
+                  elif e.response['Error']['Code'] == 'InternalServiceErrorException':
+                      # An error occurred on the server side.
+                      # Deal with the exception here, and/or rethrow at your discretion.
+                      raise e
+                  elif e.response['Error']['Code'] == 'InvalidParameterException':
+                      # You provided an invalid value for a parameter.
+                      # Deal with the exception here, and/or rethrow at your discretion.
+                      raise e
+                  elif e.response['Error']['Code'] == 'InvalidRequestException':
+                      # You provided a parameter value that is not valid for the current state of the resource.
+                      # Deal with the exception here, and/or rethrow at your discretion.
+                      raise e
+                  elif (e.response['Error']['Code']) == 'ResourceNotFoundException':
+                      # We can't find the resource that you asked for.
+                      # Deal with the exception here, and/or rethrow at your discretion.
+                      raise e
+          
+          def lambda_handler(event, context):
+              # TODO implement
+              db_instance_identifier = event["db_instance_identifier"]
+              db_version = event["db_version"]
+              s=update_secret(db_instance_identifier)
+              tag_instance(db_version,db_instance_identifier)
+              return(s)
+
+      Description: 'This function will notify slack of new instance status'
+      MemorySize: 128
+      Timeout: 900
+      Role: !GetAtt LambdaTargetAccountRole.Arn
+      Environment:
+        Variables:
+          secretname: !Ref SecretName
+          NoOfOlderInstances: !Ref NoOfOlderInstances
+          databasename: !Ref DatabaseName
+
+# Step 10:  RenameOldDBInstance
+#This function will rename the day old DB instance to make the endpoint available
+  RenameOldDBInstance:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-RenameOldDBInstance
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+              # Initialize the RDS client
+              rds = boto3.client('rds')
+          
+              # Define the tag filter
+              tag_filter = [
+                  {
+                      'Name': 'to-be-deleted',
+                      'Values': ['True']
+                  }
+              ]
+          
+              try:
+                  # Get a list of RDS instances that match the tag filter
+                  instances = rds.describe_db_instances()
+                  
+                  # Iterate through the instances and filter based on the custom tag
+                  instances_to_be_deleted = []
+                  for db_instance in instances['DBInstances']:
+                      for tag in db_instance.get('TagList', []):
+                          if tag['Key'] == 'to-be-deleted' and tag['Value'] == 'True':
+                              instances_to_be_deleted.append(db_instance)
+                  
+                  for instance in instances_to_be_deleted:
+                      print(f"Renaming Instance ID: {instance['DBInstanceIdentifier']}")
+                  #     print(f"Instance Status: {instance['DBInstanceStatus']}")
+                  #     print(f"Engine: {instance['Engine']}")
+                      print(f"Endpoint: {instance['Endpoint']['Address']}")
+                  #     print("Tags:")
+                  #     for tag in instance.get('TagList', []):
+                  #         print(f"  {tag['Key']}: {tag['Value']}")
+                  #     print("\n")
+          
+                  # Rename each instance in the list
+                  for instance in instances_to_be_deleted:
+                      instance_id = instance['DBInstanceIdentifier']
+                      new_instance_name = 'renamed-instance-to-delete'  # Replace with the desired new name
+                      rds.modify_db_instance(
+                          DBInstanceIdentifier=instance_id,ApplyImmediately=True,
+                          NewDBInstanceIdentifier=new_instance_name
+                      )
+                      print(f"Renamed instance '{instance_id}' to '{new_instance_name}'")
+          
+                  return {
+                      'statusCode': 200,
+                      'body': 'RDS instance names updated successfully.'
+                  }
+              except Exception as e:
+                  print(f"Error: {str(e)}")  # Log any exceptions for debugging
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error: {str(e)}'
+                  }
+
+      Description: 'This function will rename the day old DB instance to make the endpoint available'
+      MemorySize: 128
+      Timeout: 900
+      Role: !GetAtt LambdaTargetAccountRole.Arn
+
+# Step 11:  RenameNewDBInstance
+#This function will rename the up to date DB instance so that there is no change to endpoints for other services
+  RenameNewDBInstance:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-RenameNewDBInstance
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+              # Initialize the RDS client
+              rds = boto3.client('rds')
+          
+              # Define the substring to search for in instance names
+              substring_to_search = 'whitehat-data-warehouse-test-db-1'  # Replace with your desired substring
+          
+              try:
+                  # List all RDS instances
+                  instances = rds.describe_db_instances()
+          
+                  # Iterate through the instances and update their names
+                  for instance in instances['DBInstances']:
+                      instance_id = instance['DBInstanceIdentifier']
+                      current_instance_name = instance['DBInstanceIdentifier']
+          
+                      # Check if the current name contains the specified substring
+                      if substring_to_search in current_instance_name:
+                          # Modify the RDS instance name
+                          new_instance_name = current_instance_name.replace(substring_to_search, 'whitehat-data-warehouse-test-db')
+                          rds.modify_db_instance(
+                              DBInstanceIdentifier=instance_id,ApplyImmediately=True,
+                              NewDBInstanceIdentifier=new_instance_name
+                          )
+                          print(f"Renamed instance '{current_instance_name}' to '{new_instance_name}'")
+          
+                  return {
+                      'statusCode': 200,
+                      'body': f'RDS instance names updated successfully.'
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error: {str(e)}'
+                  }
+
+      Description: 'This function will rename the up to date DB instance & endpoint to original'
+      MemorySize: 128
+      Timeout: 900
+      Role: !GetAtt LambdaTargetAccountRole.Arn
+
+# Step 12:  CleanOlderDBInstances
+#This function will delete tagged rds instances.
+  CleanOlderDBInstances:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-CleanOlderDBInstances
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import logging
+          import json
+          import boto3
+          from botocore.exceptions import ClientError
+
+          # Set up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def delete_db_instance(dbname):
+
+              # Create RDS client
+              rds = boto3.client('rds')
+
+              try:
+                  response = rds.delete_db_instance(
+                  DBInstanceIdentifier=dbname,
+                  SkipFinalSnapshot=True,
+                  DeleteAutomatedBackups=True
+                  )
+                  return(response)
+              except Exception as e:
+                  raise e
+
+          def lambda_handler(event, context):
+              # TODO implement
+
+              client = boto3.client('resourcegroupstaggingapi')
+              
+              try: 
+                  response = client.get_resources(
+                  PaginationToken='',
+                  TagFilters=[
+                      {
+                          'Key': 'to-be-deleted',
+                          'Values': [
+                              'True',
+                          ]
+                      },
+                  ],
+                  ResourcesPerPage=20,
+                  ResourceTypeFilters=[
+                      'rds:db',
+                  ],
+                  IncludeComplianceDetails=False,
+                  ExcludeCompliantResources=False
+                  )
+                  print(json.dumps(response,indent=4))
+                  
               except Exception as e:
                   return {'status':'NotAvailable', "db_instance_identifier": event["db_instance_identifier"], "db_version": event["db_version"] }
                   raise e
@@ -850,9 +1055,24 @@ Resources:
                     "Seconds": 300,
                     "Next": "FetchNewDBInstanceStatus"
                   },
-                  "AlertSlackChannel": {
+                  "UpdateSecretWithDBValue": {
                     "Type": "Task",
-                    "Resource": "${AlertSlackChannel.Arn}",
+                    "Resource": "${UpdateAWSSecret.Arn}",
+                    "Next": "RenameOldDBInstance"
+                  },
+                  "RenameOldDBInstance": {
+                    "Type": "Task",
+                    "Resource": "${RenameOldDBInstance.Arn}",
+                    "Next": "RenameNewDBInstance"
+                  },
+                  "RenameNewDBInstance": {
+                    "Type": "Task",
+                    "Resource": "${RenameNewDBInstance.Arn}",
+                    "Next": "CleanOlderDBInstances"
+                  },
+                  "CleanOlderDBInstances": {
+                    "Type": "Task",
+                    "Resource": "${CleanOlderDBInstances.Arn}",
                     "End": true
               }
               }
