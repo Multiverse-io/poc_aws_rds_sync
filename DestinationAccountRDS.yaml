@@ -466,26 +466,27 @@ Resources:
           import boto3
           import logging
           import os
-
+          
           rds = boto3.client('rds')
-
+          
           engine = os.environ.get("engine")
           dbInstanceClass = os.environ.get("dbInstanceClass") 
           subnetgroups = os.environ.get("subnetgroups")
           securitygroupid = os.environ.get("securitygroupid")
           databasename = os.environ.get("databasename")
-
+          
           def lambda_handler(event, context):
               if event['DBSnapshot']['db_value']['db_prefix']:
                   db_host_prefix_value = event['DBSnapshot']['db_value']['db_prefix']+"-"
                   db_host=event['DBSnapshot']['db_value']['db_host']
                   db_host_str = db_host.split(".",1)[0].split(db_host_prefix_value, maxsplit=1)
                   print(db_host_str)
-                  db_version = int(db_host_str[1])
+                  db_version = int(0)
+                  print(db_version)
               else:
                   db_host_prefix_value=databasename+"-"
                   db_version=0
-
+          
               DBInstanceIdentifier=db_host_prefix_value + str(db_version+1)
               db_snapshot_identifier = event['DBSnapshot']['TargetDBSnapshotIdentifier']
               print("Bring new instance", DBInstanceIdentifier ,"from snapshot ->", db_snapshot_identifier)
@@ -502,7 +503,6 @@ Resources:
               except Exception as e:
                   print(e)
                   raise e
-
       Description: 'This function will restore RDS instance from shared snapshot.'
       MemorySize: 128
       Timeout: 60
@@ -575,35 +575,35 @@ Resources:
           import json
           import base64
           from botocore.exceptions import ClientError
-
+          
           # Set up logging
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-
+          
           # Create RDS client
           rds = boto3.client('rds')
               
-          def tag_instance(db_version,db_instance_identifier):
+          def tag_instance(db_instance_identifier):
               NoOfOlderInstances=os.environ.get("NoOfOlderInstances")
+              databasename=os.environ.get("databasename")
               # Access the older DB instance and get the arn
               
-              db_prefix=("".join(db_instance_identifier.rsplit(db_version)))
-              print(db_version,db_instance_identifier, db_prefix )
+              # db_prefix=("".join(db_instance_identifier.rsplit(db_version)))
+              # print(db_version,db_instance_identifier, db_prefix )
+              print(db_instance_identifier )
               print("*******************************")
-              oldest_db_version=int(db_version)-int(NoOfOlderInstances)
-              print (oldest_db_version)
+              # oldest_db_version=int(db_version)-int(NoOfOlderInstances)
+              # print (oldest_db_version)
               
-              if oldest_db_version < 0 :
-                  return (None)
-              else:
-                  oldest_db_instance_identifier=db_prefix+str(oldest_db_version)
-                  print(oldest_db_instance_identifier)
+              if db_instance_identifier == databasename:
+                  # oldest_db_instance_identifier=db_prefix+str(oldest_db_version)
+                  print(db_instance_identifier)
                   
                   try:
                       response = rds.describe_db_instances(
-                          DBInstanceIdentifier=oldest_db_instance_identifier
+                          DBInstanceIdentifier=db_instance_identifier
                       )
-                      oldest_db_instance_arn=response["DBInstances"][0]["DBInstanceArn"]
+                      oldest_db_instance_arn="arn:aws:rds:eu-west-2:934596636012:db:whitehat-data-warehouse-test-db"
                       logger.info('### oldest_db_instance_arn ###')
                       logger.info(oldest_db_instance_arn)
                   
@@ -621,12 +621,14 @@ Resources:
                       return(response)
                   except ClientError as e:
                       print("Older instance not found",e)
+              else:
+                  return(None)
                   
           def update_secret(db_instance_identifier):
               secret_name = os.environ.get("secretname")
               db_prefix = os.environ.get("databasename")
               region_name = "eu-west-2"
-
+          
               # Find the endpoint name of new cluster
               try:
                   response = rds.describe_db_instances(
@@ -686,14 +688,16 @@ Resources:
                       # We can't find the resource that you asked for.
                       # Deal with the exception here, and/or rethrow at your discretion.
                       raise e
-
+          
           def lambda_handler(event, context):
               # TODO implement
               db_instance_identifier = event["db_instance_identifier"]
-              db_version = event["db_version"]
+              # No need to update version as it should always be the same due to no change in end point
+              # db_version = event["db_version"]
               s=update_secret(db_instance_identifier)
-              tag_instance(db_version,db_instance_identifier)
+              tag_instance(db_instance_identifier)
               return(s)
+
 
       Description: 'This function will swap the rds name with existing rds'
       MemorySize: 128
@@ -730,26 +734,46 @@ Resources:
           
               try:
                   # Get a list of RDS instances that match the tag filter
-                  instances = rds.describe_db_instances(Filters=tag_filter)
+                  instances = rds.describe_db_instances()
+                  
+                  # Iterate through the instances and filter based on the custom tag
+                  instances_to_be_deleted = []
+                  for db_instance in instances['DBInstances']:
+                      for tag in db_instance.get('TagList', []):
+                          if tag['Key'] == 'to-be-deleted' and tag['Value'] == 'True':
+                              instances_to_be_deleted.append(db_instance)
+                  
+                  for instance in instances_to_be_deleted:
+                      print(f"Renaming Instance ID: {instance['DBInstanceIdentifier']}")
+                  #     print(f"Instance Status: {instance['DBInstanceStatus']}")
+                  #     print(f"Engine: {instance['Engine']}")
+                      print(f"Endpoint: {instance['Endpoint']['Address']}")
+                  #     print("Tags:")
+                  #     for tag in instance.get('TagList', []):
+                  #         print(f"  {tag['Key']}: {tag['Value']}")
+                  #     print("\n")
           
-                  # Iterate through the instances and update their names
-                  for instance in instances['DBInstances']:
+                  # Rename each instance in the list
+                  for instance in instances_to_be_deleted:
                       instance_id = instance['DBInstanceIdentifier']
-                      new_instance_name = 'renamed_instance_to_delete'  # Replace with the desired new name
+                      new_instance_name = 'renamed-instance-to-delete'  # Replace with the desired new name
                       rds.modify_db_instance(
                           DBInstanceIdentifier=instance_id,
                           NewDBInstanceIdentifier=new_instance_name
                       )
+                      print(f"Renamed instance '{instance_id}' to '{new_instance_name}'")
           
                   return {
                       'statusCode': 200,
                       'body': 'RDS instance names updated successfully.'
                   }
               except Exception as e:
+                  print(f"Error: {str(e)}")  # Log any exceptions for debugging
                   return {
                       'statusCode': 500,
                       'body': f'Error: {str(e)}'
                   }
+
       Description: 'This function will rename the day old DB instance to make the endpoint available'
       MemorySize: 128
       Timeout: 900
