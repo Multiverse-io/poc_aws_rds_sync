@@ -785,7 +785,7 @@ Resources:
                       instance_id = instance['DBInstanceIdentifier']
                       new_instance_name = 'renamed-instance-to-delete'  # Replace with the desired new name
                       rds.modify_db_instance(
-                          DBInstanceIdentifier=instance_id,
+                          DBInstanceIdentifier=instance_id,ApplyImmediately=True,
                           NewDBInstanceIdentifier=new_instance_name
                       )
                       print(f"Renamed instance '{instance_id}' to '{new_instance_name}'")
@@ -823,7 +823,7 @@ Resources:
               rds = boto3.client('rds')
           
               # Define the substring to search for in instance names
-              substring_to_search = 'whitehat-data-warehouse-test-db-'  # Replace with your desired substring
+              substring_to_search = 'whitehat-data-warehouse-test-db-1'  # Replace with your desired substring
           
               try:
                   # List all RDS instances
@@ -839,9 +839,10 @@ Resources:
                           # Modify the RDS instance name
                           new_instance_name = current_instance_name.replace(substring_to_search, 'whitehat-data-warehouse-test-db')
                           rds.modify_db_instance(
-                              DBInstanceIdentifier=instance_id,
+                              DBInstanceIdentifier=instance_id,ApplyImmediately=True,
                               NewDBInstanceIdentifier=new_instance_name
                           )
+                          print(f"Renamed instance '{current_instance_name}' to '{new_instance_name}'")
           
                   return {
                       'statusCode': 200,
