@@ -1,13 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: 'AWS::Serverless-2016-10-31'
-Description: Yaml template for sync Postgres database from database from dev account.
+Description: Yaml template for sync Postgres database from database from prod account.
 Parameters:
 #general params 
 
   SourceDBIdentifier:  
-    Description: Existing RDS cluster (whitehat-data-warehouse-development-db)
+    Description: Existing RDS cluster (whitehat-data-warehouse-production-db)
     Type: String
-    Default: 'whitehat-data-warehouse-development-db'
+    Default: 'whitehat-data-warehouse-production-db'
 
   KMSKey:
     Description: Arn of Cross Account KMS Key that is shared with destination account
@@ -17,7 +17,7 @@ Parameters:
   SourceDBSnapshotName:
     Description: Name of the Snapshot
     Type: String
-    Default: 'whitehat-data-warehouse-development-db-snapshot'
+    Default: 'whitehat-data-warehouse-production-db-sync'
   
   DestinationAccountNumber: 
     Description: Destination Account Number 
@@ -27,7 +27,7 @@ Parameters:
   ScheduleExpression:
     Type: String 
     Description: Schedule expressions using cron
-    Default: cron(0 5 * * ? *)
+    Default: cron(00 2 * * ? *)
 
 Resources: 
 #Role that lambda will assume in source account  

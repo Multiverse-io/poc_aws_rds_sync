@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: 'AWS::Serverless-2016-10-31'
 Description: Yaml template for DB Instance creation from snapshot.
 Parameters:
-# General params : test-data-warehouse-production-db-snapshot
+# General params
 
   Engine:
     Type: String
@@ -22,7 +22,7 @@ Parameters:
   DatabaseName:
     Type: String 
     Description: Name of the database in this account.  
-    Default: "whitehat-data-warehouse-test-db"
+    Default: "whitehat-data-warehouse-development-db"
 
   SecretName:
     Type: String 
@@ -789,7 +789,7 @@ Resources:
               rds = boto3.client('rds')
           
               # Define the substring to search for in instance names
-              substring_to_search = 'whitehat-data-warehouse-test-db-1'  # Replace with your desired substring
+              substring_to_search = 'whitehat-data-warehouse-development-db-1'  # Replace with your desired substring
           
               try:
                   # List all RDS instances
@@ -803,7 +803,7 @@ Resources:
                       # Check if the current name contains the specified substring
                       if substring_to_search in current_instance_name:
                           # Modify the RDS instance name
-                          new_instance_name = current_instance_name.replace(substring_to_search, 'whitehat-data-warehouse-test-db')
+                          new_instance_name = current_instance_name.replace(substring_to_search, 'whitehat-data-warehouse-development-db')
                           rds.modify_db_instance(
                               DBInstanceIdentifier=instance_id,
                               NewDBInstanceIdentifier=new_instance_name,

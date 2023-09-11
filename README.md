@@ -70,25 +70,25 @@ Once deployment is successful, please note down ***Physical ID and ARN*** of Inv
 #### 3) Add permission on SNS to allow subscription from lambda of destination account
 #### Source Account
 aws sns add-permission \
-  --label lambda-access 
-  --aws-account-id <destinationaccount> \
-  --topic-arn arn:aws:sns:eu-west-2:<sourceaccount>:CrossAccountSnapshotNotificationSNSTopic --action-name Subscribe ListSubscriptionsByTopic
+--label lambda-access --aws-account-id "934596636012" \
+--topic-arn "arn:aws:sns:eu-west-2:797159918096:test-source-rdssync-CrossAccountSnapshotNotificationSNSTopic" \
+--action-name Subscribe ListSubscriptionsByTopic 
 
 #### 4) Add permission on lambda to allow SNS to trigger it
 #### Destination Account
 aws lambda add-permission \
-  --function-name HTPExp-RDSCrossAccntSync-InvokeStepFunction \
-  --statement-id sns_invoke_permission \
-  --action lambda:InvokeFunction \
-  --principal sns.amazonaws.com \
-  --source-arn arn:aws:sns:eu-west-2:<sourceaccount>:CrossAccountSnapshotNotificationSNSTopic
+--function-name "test-dest-rdssync-InvokeStepFunction" \
+--source-arn "arn:aws:sns:eu-west-2:797159918096:test-source-rdssync-CrossAccountSnapshotNotificationSNSTopic" \
+--statement-id function-with-sns \
+--action lambda:InvokeFunction \
+--principal sns.amazonaws.com
 
 ### 5) Create a subscription
 #### Destination Account
 aws sns subscribe \
-  --topic-arn arn:aws:sns:eu-west-2:<sourceaccount>:CrossAccountSnapshotNotificationSNSTopic \
-  --protocol "lambda" \
-  --notification-endpoint arn:aws:lambda:us-east-1:<destinationaccount>:function:HTPExp-RDSCrossAccntSync-InvokeStepFunction
+--protocol "lambda" \
+--topic-arn "arn:aws:sns:eu-west-2:797159918096:test-source-rdssync-CrossAccountSnapshotNotificationSNSTopic" \
+--notification-endpoint "arn:aws:lambda:eu-west-2:934596636012:function:test-dest-rdssync-InvokeStepFunction"
 
 ## Trouble shooting / Gotchas
 
